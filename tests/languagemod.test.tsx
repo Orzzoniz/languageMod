@@ -9,6 +9,7 @@ import {
   looksForeign,
   maskCode,
   parseCoach,
+  parseLearnArgs,
   parseTranslation,
   proseOf,
   restoreCode,
@@ -16,7 +17,8 @@ import {
 
 const SAVED = { ...DEFAULT_SETTINGS, native: 'zh-CN' }
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
-const COMPOSE = { model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] }
+const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'] as const, tools: [], outputStyle: null, traits: [] }
+const COMPOSE_PHONE = { ...COMPOSE, surfaces: ['mobile'] as const }
 const SCROLL = { offset: 0, bodyRows: 20 }
 const BAND = {
   component: 'AbovePrompt',
@@ -50,8 +52,8 @@ type Beneath = {
   translation?: string
   /** Called with each model request: its system prompt and prompt. */
   onModel?: (system: string, prompt: string) => void
-  /** Called with each prompt that reaches Claude Code. */
-  onPrompt?: (text: string) => void
+  /** Called with each prompt that reaches Claude Code, and what the model reads beside it. */
+  onPrompt?: (text: string, context: readonly string[]) => void
   /** The surfaces drawing the session; the terminal when not given. */
   surfaces?: readonly ('terminal' | 'desktop' | 'mobile' | 'vscode')[]
   /** Called with each toast. */
@@ -64,9 +66,10 @@ function engine(on: On, beneath: Beneath = {}) {
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }] }))
   on('prompt.submit', ($, e) => {
-    beneath.onPrompt?.(e.text)
+    beneath.onPrompt?.(e.text, e.context ?? [])
     return { text: e.text }
   })
+  on('turn.complete', ($, e) => ({ text: e.answer }))
   on('prompt.fill', () => ({ isFilled: true }))
   on('model.complete', ($, e) => {
     const system = e.system ?? ''
@@ -238,7 +241,7 @@ test('a message with a mistake shows a tip, and its word can be saved', async ($
   await band.unmount()
 
   const result = await $.command.run({ command: 'words', args: '', origin: { kind: 'composer' }, presentation: undefined as never })
-  expect(result.text).toContain('1 word')
+  expect(result.text).toContain('affect = 影响')
 })
 
 test('with Corrections off, no check runs until /check', async ($, on) => {
@@ -392,24 +395,89 @@ test('when the translation fails, the original message is sent', async ($, on) =
   expect(sent).toEqual(['请修复 `app.js` 让页面能用'])
 })
 
-test('on a phone, /learn opens a panel with the setup, and tips arrive as toasts', async ($, on) => {
-  const toasts: string[] = []
-  engine(on, { coach: CORRECTION, surfaces: ['mobile'], onToast: text => toasts.push(text) })
+const RUN = { origin: { kind: 'bridge' }, presentation: undefined as never } as const
+
+test('learn commands parse in plain words', () => {
+  expect(parseLearnArgs('')).toEqual({ kind: 'status' })
+  expect(parseLearnArgs('OFF')).toEqual({ kind: 'master', isOn: false })
+  expect(parseLearnArgs('ja')).toEqual({ kind: 'language', code: 'ja' })
+  expect(parseLearnArgs('Chinese')).toEqual({ kind: 'language', code: 'zh-CN' })
+  expect(parseLearnArgs('한국어')).toEqual({ kind: 'language', code: 'ko' })
+  expect(parseLearnArgs('middle')).toEqual({ kind: 'level', level: 'middle' })
+  expect(parseLearnArgs('wordhelp off')).toEqual({ kind: 'feature', feature: 'glossary', isOn: false })
+  expect(parseLearnArgs('translate check')).toEqual({ kind: 'translateMode', mode: 'review' })
+  expect(parseLearnArgs('corrections all')).toEqual({ kind: 'strictness', strictness: 'all' })
+  expect(parseLearnArgs('blah')).toEqual({ kind: 'unknown', text: 'blah' })
+})
+
+test('on a phone, setup and switches work by text commands', async ($, on) => {
+  engine(on, { surfaces: ['mobile'] })
   mock.store(on)
+  mock.clock(on)
+  await $.session.start(START)
+
+  const setupNote = await $.prompt.compose(COMPOSE_PHONE)
+  expect(setupNote.sections.at(-1)?.text).toContain('send /learn')
+
+  expect((await $.command.run({ command: 'learn', args: '', ...RUN })).text).toContain('/learn ja')
+  expect((await $.command.run({ command: 'learn', args: 'japanese', ...RUN })).text).toContain('Step 2 of 2')
+  const done = await $.command.run({ command: 'learn', args: 'middle', ...RUN })
+  expect(done.text).toContain('English practice is ON')
+  expect(done.text).toContain('日本語')
+
+  const off = await $.command.run({ command: 'learn', args: 'translate off', ...RUN })
+  expect(off.text).toMatch(/Translate\s+Off/)
+  expect((await $.command.run({ command: 'learn', args: 'off', ...RUN })).text).toContain('OFF')
+  expect((await $.command.run({ command: 'learn', args: 'nonsense', ...RUN })).text).toContain('I don\'t know')
+})
+
+test('on a phone, tips and translations go in Claude\'s reply', async ($, on) => {
+  let checks = 0
+  const sent: { text: string; context: readonly string[] }[] = []
+  engine(on, {
+    surfaces: ['mobile'],
+    translation: TRANSLATION,
+    onModel: system => {
+      if (!system.includes('You translate')) checks += 1
+    },
+    onPrompt: (text, context) => sent.push({ text, context }),
+  })
+  mock.store(on, { settings: { ...SAVED, translateMode: 'review' } })
   const clock = mock.clock(on)
   await $.session.start(START)
-  expect(toasts.some(text => text.includes('/learn'))).toBe(true)
 
-  const learned = await $.command.run({ command: 'learn', args: '', origin: { kind: 'bridge' }, presentation: undefined as never })
-  expect(learned.text).toContain('panel')
-  const pane = await $.ui.mount({ plugin: 'languagemod', surface: 'mobile', ...SETTINGS_PANE })
-  await pane.press({ key: 'lang:ko' })
-  await pane.press({ key: 'level:beginner' })
-  expect(await pane.find({ key: 'set:feature:translate' })).toBeDefined()
+  const phone = await $.prompt.compose(COMPOSE_PHONE)
+  const rules = phone.sections.find(one => one.id === 'languagemod:learn')?.text ?? ''
+  expect(rules).toContain('**English tip:**')
+  expect(rules).toContain('**In English:**')
+  const terminal = await $.prompt.compose(COMPOSE)
+  expect(terminal.sections.find(one => one.id === 'languagemod:learn')?.text).not.toContain('English tip')
 
   await $.prompt.submit({ text: 'could u think the result will effect now page?', wait: false, origin: { kind: 'bridge' } })
   await clock.settle()
-  expect(toasts.some(text => text.includes('affect this page'))).toBe(true)
-  expect(await pane.find({ key: 'tip:ok' })).toBeDefined()
-  await pane.unmount()
+  expect(checks).toBe(0)
+
+  await $.prompt.submit({ text: '请修复 `app.js` 让页面能用', wait: false, origin: { kind: 'bridge' } })
+  expect(sent.at(-1)?.text).toBe('Please fix `app.js` so the page works.')
+  expect(sent.at(-1)?.context.join(' ')).toContain('translated this message from Chinese')
+})
+
+test('on a phone, words are listed and saved by text, and the quiz runs in the chat', async ($, on) => {
+  const sent: string[] = []
+  engine(on, { surfaces: ['mobile'], onPrompt: text => sent.push(text) })
+  mock.store(on, { settings: SAVED })
+  const clock = mock.clock(on)
+  await $.session.start(START)
+
+  await $.turn.complete({ answer: 'It is **deprecated** (已弃用).', reason: 'answer', durationMs: 1, isAborted: false, turnId: 't1' })
+  const list = await $.command.run({ command: 'words', args: '', ...RUN })
+  expect(list.text).toContain('deprecated = 已弃用')
+  expect(list.text).toContain('/words save')
+  expect((await $.command.run({ command: 'words', args: 'save', ...RUN })).text).toContain('Saved 1')
+  expect((await $.command.run({ command: 'words', args: '', ...RUN })).text).toContain('Your words (1)')
+
+  expect((await $.command.run({ command: 'quiz', args: '', ...RUN })).text).toContain('1 word')
+  await clock.settle()
+  expect(sent.at(-1)).toContain('Quiz me')
+  expect(sent.at(-1)).toContain('deprecated')
 })

@@ -25,8 +25,9 @@ There is also a word notebook and a quiz. Words you don't know yet come back fir
 
 ## How it looks
 
-Type `/learn` to open the **English practice** panel. It works in the terminal, the desktop app, the web and the phone app.
-In the terminal and the desktop app, the same things also show in a box above the input.
+In the **terminal** and the **desktop app**, the mod draws boxes and panels with buttons.
+In the **web** and **phone apps**, which don't draw them, everything works with text: `/learn` answers with a menu of commands,
+correction tips come at the end of Claude's reply, and a translated message starts the reply with **In English:**.
 
 The first time, two clicks:
 
@@ -42,7 +43,14 @@ A message you wrote in your language, as Claude reads it:
   (you wrote: 请修复 `app.js` 让页面能用)
 ```
 
-A correction tip:
+In the web and phone apps, a correction tip at the end of Claude's reply:
+
+```
+English tip: "how i can say thank you polite in a email?" → "How can I say thank you politely in an email?"
+(語順は "How can I...?"、"politely" は副詞です)
+```
+
+A correction tip in the box above the input (terminal and desktop app):
 
 ```
 English tip · you wrote: “could u think the result will effect now page?”
@@ -72,9 +80,16 @@ Level: [ Beginner ] [ Middle ] [ Advanced ]
 
 | Command | What it does |
 | --- | --- |
-| `/learn` | Open the settings. `/learn off` turns everything off, `/learn on` turns it back on. |
-| `/words` | Open your word notebook. |
-| `/quiz` | Practice your saved words. |
+| `/learn` | Show the settings, or start the setup. |
+| `/learn ja`, `/learn chinese` … | Choose your help language. `/learn language` lists them all. |
+| `/learn beginner`, `middle`, `advanced` | Choose your level. |
+| `/learn translate off` | Switch one part off (or `on`): `translate`, `simple`, `wordhelp`, `corrections`, `collect`. |
+| `/learn translate check` | Let me check the English first (terminal and desktop app). `/learn translate send` sends at once. |
+| `/learn corrections all` | Show every mistake. `/learn corrections big` shows only big ones. |
+| `/learn off`, `/learn on` | Turn everything off, or back on. |
+| `/words` | Show your saved words, and the new words from Claude's last reply. |
+| `/words save` | Save the new words from Claude's last reply. `/words remove <word>` removes one. |
+| `/quiz` | Practice your saved words. In the web and phone apps, Claude quizzes you in the chat. |
 | `/explain` | Explain Claude's last reply in your language. `/explain <text>` explains that text. |
 | `/check` | Check the English of your last message. It works when Corrections is off too. |
 

@@ -1,5 +1,5 @@
 import type { Feature, Level, NewWord, Practice, Word } from '../types'
-import { isKnownLanguage, languageOf } from './languages'
+import { ENGLISH, isKnownLanguage, LANGUAGES, languageOf } from './languages'
 
 export const COACH_MODEL = 'haiku'
 
@@ -32,11 +32,16 @@ const GLOSS_LIMIT: Record<Level, string> = {
   advanced: 'at most 2 words per reply: only rare or tricky words',
 }
 
-/** The system prompt section for the parts of practice mode that change Claude's replies, or null when none is on. */
-export function learnSection(s: Practice): string | null {
+/**
+ * The system prompt section for the parts of practice mode that change Claude's replies, or null when none is on.
+ * `inReply` is for surfaces that draw no box above the input: tips and translations go in the reply itself.
+ */
+export function learnSection(s: Practice, inReply = false): string | null {
   const isSimple = isActive(s, 'simple')
   const isGlossary = isActive(s, 'glossary')
-  if (!isSimple && !isGlossary) return null
+  const isCoach = inReply && isActive(s, 'coach')
+  const isTranslate = inReply && isActive(s, 'translate')
+  if (!isSimple && !isGlossary && !isCoach && !isTranslate) return null
 
   const lang = languageOf(s.native)
   const lines = [
@@ -54,12 +59,150 @@ export function learnSection(s: Practice): string | null {
       `Help with vocabulary: the first time you use a hard word in a reply, write it in bold and put ${how} Do this for ${GLOSS_LIMIT[s.level]}. Never do it inside code blocks, inline code, commands, file paths, or commit messages.`,
     )
   }
-  lines.push(
-    'Keep code, identifiers, code comments, commit messages, and file contents in normal English.',
-    "Do not correct the user's English in your reply: a separate tool shows them corrections.",
-  )
+  if (isTranslate) {
+    lines.push(
+      'When a note says the practice tool translated the user\'s message, start your reply with one line: **In English:** "<the English message>", so they learn how to say it.',
+    )
+  }
+  if (isCoach) {
+    const which =
+      s.strictness === 'all'
+        ? 'any grammar, spelling, or word-choice mistake (ignore capital letters and final punctuation)'
+        : 'a big mistake: a wrong or misspelled word, a wrong verb form, a missing word, or word order that makes the meaning unclear'
+    const reason = lang.code === 'en' ? 'a short reason in simple English' : `a short reason in ${lang.english}`
+    lines.push(
+      `English corrections: when the user's latest message is in English and has ${which}, end your reply with one line: **English tip:** "<their words>" → "<better English>" (${reason}). Ignore code, commands, and names. When there is no such mistake, or the message was translated, add nothing.`,
+    )
+  }
+  lines.push('Keep code, identifiers, code comments, commit messages, and file contents in normal English.')
+  if (!isCoach) lines.push("Do not correct the user's English in your reply: a separate tool shows them corrections.")
   return lines.join('\n')
 }
+
+/** Tells Claude to point the person to the setup once, while practice mode is installed but not set up. */
+export const SETUP_SECTION = [
+  '# English practice tool',
+  'The user has an English practice tool that is not set up yet.',
+  'At the end of your first reply in this conversation only, add one line: "Tip: send /learn to set up English practice."',
+].join('\n')
+
+const FEATURE_WORDS: Record<string, Feature> = {
+  translate: 'translate',
+  simple: 'simple',
+  wordhelp: 'glossary',
+  glossary: 'glossary',
+  corrections: 'coach',
+  correction: 'coach',
+  coach: 'coach',
+  collect: 'collect',
+}
+
+export const FEATURE_ARG: Record<Feature, string> = {
+  translate: 'translate',
+  simple: 'simple',
+  glossary: 'wordhelp',
+  coach: 'corrections',
+  collect: 'collect',
+}
+
+export type LearnAction =
+  | { kind: 'status' }
+  | { kind: 'master'; isOn: boolean }
+  | { kind: 'languages' }
+  | { kind: 'language'; code: string }
+  | { kind: 'level'; level: Level }
+  | { kind: 'feature'; feature: Feature; isOn: boolean }
+  | { kind: 'translateMode'; mode: 'send' | 'review' }
+  | { kind: 'strictness'; strictness: 'big' | 'all' }
+  | { kind: 'unknown'; text: string }
+
+/** What `/learn <args>` asks for, as typed in any case. */
+export function parseLearnArgs(args: string): LearnAction {
+  const text = args.trim()
+  const words = text.toLowerCase().split(/\s+/).filter(word => word !== '')
+  const [first, second] = words
+  if (first === undefined) return { kind: 'status' }
+  if (words.length === 1 && (first === 'on' || first === 'off')) return { kind: 'master', isOn: first === 'on' }
+  if (first === 'language' || first === 'languages') return { kind: 'languages' }
+  if (first === 'beginner' || first === 'middle' || first === 'advanced') return { kind: 'level', level: first }
+  const feature = FEATURE_WORDS[first]
+  if (feature !== undefined) {
+    if (second === 'on' || second === 'off') return { kind: 'feature', feature, isOn: second === 'on' }
+    if (feature === 'translate' && (second === 'send' || second === 'check')) {
+      return { kind: 'translateMode', mode: second === 'check' ? 'review' : 'send' }
+    }
+    if (feature === 'coach' && (second === 'big' || second === 'all')) return { kind: 'strictness', strictness: second }
+    return { kind: 'unknown', text }
+  }
+  const lang = findLanguage(text)
+  return lang === undefined ? { kind: 'unknown', text } : { kind: 'language', code: lang }
+}
+
+function findLanguage(text: string): string | undefined {
+  const wanted = text.trim().toLowerCase()
+  const all = [...LANGUAGES, ENGLISH]
+  const exact = all.find(
+    lang => lang.code.toLowerCase() === wanted || lang.native.toLowerCase() === wanted || lang.english.toLowerCase() === wanted,
+  )
+  if (exact !== undefined) return exact.code
+  // "chinese", "portuguese", "english": the first language whose English name has that word.
+  return all.find(lang => lang.english.toLowerCase().split(' ').includes(wanted))?.code
+}
+
+export function languagesText(isFirstTime: boolean): string {
+  const rows = [...LANGUAGES, ENGLISH].map(lang => `/learn ${lang.code.padEnd(6)} ${lang.native}`)
+  return [
+    isFirstTime ? 'English practice setup, step 1 of 2.' : 'Change your help language.',
+    'Which language do you know best? Send one of these:',
+    '',
+    ...rows,
+  ].join('\n')
+}
+
+export function levelsText(): string {
+  return [
+    'Step 2 of 2: what is your English level? Send one of these:',
+    '',
+    '/learn beginner   short, easy sentences',
+    '/learn middle     plain sentences',
+    '/learn advanced   normal technical English',
+  ].join('\n')
+}
+
+const FEATURE_LABEL: Record<Feature, string> = {
+  translate: 'Translate',
+  simple: 'Simple English',
+  glossary: 'Word help',
+  coach: 'Corrections',
+  collect: 'Collect words',
+}
+
+export function statusText(s: Practice, wordCount: number): string {
+  const lang = languageOf(s.native)
+  const level = s.level[0]?.toUpperCase() + s.level.slice(1)
+  const rows = FEATURES.map(feature => {
+    const isOn = s.features[feature]
+    const toggle = `/learn ${FEATURE_ARG[feature]} ${isOn ? 'off' : 'on'}`
+    return `${FEATURE_LABEL[feature].padEnd(15)}${isOn ? 'On ' : 'Off'}   change: ${toggle}`
+  })
+  return [
+    s.isOn ? 'English practice is ON.' : 'English practice is OFF. Send /learn on to start again.',
+    `Help language: ${lang.native} (change: /learn language)`,
+    `Level: ${level} (change: /learn beginner, /learn middle, /learn advanced)`,
+    '',
+    ...rows,
+    '',
+    `Translate then: ${s.translateMode === 'review' ? 'let me check first' : 'send in English'} (change: /learn translate send, /learn translate check)`,
+    ...(s.translateMode === 'review'
+      ? ['  (Checking first works in the terminal and desktop app. In the web and phone apps the English is sent at once.)']
+      : []),
+    `Corrections show: ${s.strictness === 'all' ? 'every mistake' : 'big mistakes'} (change: /learn corrections big, /learn corrections all)`,
+    '',
+    `Saved words: ${wordCount} (/words to see them, /quiz to practice)`,
+    ...(s.isOn ? ['Turn everything off: /learn off'] : []),
+  ].join('\n')
+}
+
 
 export function coachSystem(s: Practice): string {
   const lang = languageOf(s.native)

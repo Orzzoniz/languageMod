@@ -23,10 +23,13 @@ import {
   harvestWords,
   isActive,
   isWorthChecking,
+  languagesText,
   learnSection,
+  levelsText,
   looksForeign,
   maskCode,
   parseCoach,
+  parseLearnArgs,
   parseSettings,
   parseTranslation,
   parseWords,
@@ -34,6 +37,8 @@ import {
   quizOrder,
   restoreCode,
   sameText,
+  SETUP_SECTION,
+  statusText,
   translateSystem,
 } from './coach'
 import { ENGLISH, LANGUAGES, languageOf } from './languages'
@@ -86,10 +91,16 @@ type CheckResult = 'tip' | 'ok' | 'skipped' | 'failed'
 // Only the newest check may show its tip, so a slow answer never replaces a newer one.
 let checkCount = 0
 
-/** Whether a surface that draws the band above the input (terminal, desktop) is attached. */
+const drawsBand = (surfaces: readonly string[]) =>
+  surfaces.some(surface => surface === 'terminal' || surface === 'desktop')
+
+/**
+ * Whether a surface that draws the band above the input (terminal, desktop) is attached.
+ * Without one (the web and phone apps), tips and translations go in Claude's reply and the commands answer in text.
+ */
 async function hasBand($: EngineInterface): Promise<boolean> {
   try {
-    return (await $.session.surfaces()).some(surface => surface === 'terminal' || surface === 'desktop')
+    return drawsBand(await $.session.surfaces())
   } catch {
     return true
   }
@@ -613,7 +624,9 @@ export const register: Register = on => {
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     const s = await read($, settings)
-    const text = s === null ? null : learnSection(s)
+    const inReply = !drawsBand(e.surfaces)
+    const isSettingUp = s === null && inReply && (await read($, setup)) !== null
+    const text = s === null ? (isSettingUp ? SETUP_SECTION : null) : learnSection(s, inReply)
     if (text === null) return composed
     return { sections: [...composed.sections, { id: 'languagemod:learn', text, scope: 'session' as const }] }
   })
@@ -625,20 +638,23 @@ export const register: Register = on => {
     await update($, tip, () => null)
 
     const s = await read($, settings)
+    const isBand = await hasBand($)
     if (isActive(s, 'translate') && looksForeign(proseOf(text), s.native)) {
       const translation = await translate($, text, s, next.signal)
-      if (translation !== null && s.translateMode === 'review') {
+      // Checking first needs the box above the input; elsewhere the English goes at once.
+      if (translation !== null && s.translateMode === 'review' && isBand) {
         await update($, pending, () => translation)
-        if (await hasBand($)) return { drop: 'Check the English version above the input box.' }
-        await openPractice($)
-        return { drop: 'Check the English version in the English practice panel.' }
+        return { drop: 'Check the English version above the input box.' }
       }
       if (translation !== null) {
         await rememberTranslation($, translation)
-        return next({ ...e, text: translation.english })
+        const from = translation.language === '' ? 'another language' : translation.language
+        const note = `The practice tool translated this message from ${from}. The user wrote: ${translation.original}`
+        return next({ ...e, text: translation.english, context: [...(e.context ?? []), note] })
       }
     }
-    if (isActive(s, 'coach')) {
+    // Without the box, Claude puts the tip in its reply (see learnSection), so no separate check runs.
+    if (isActive(s, 'coach') && isBand) {
       $.clock.after(0, () => void runCheck($, text, false))
     }
     return next(e)
@@ -694,30 +710,99 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'learn' }, async ($, e) => {
-    const arg = e.args.trim().toLowerCase()
-    if ((arg === 'on' || arg === 'off') && (await read($, settings)) !== null) {
-      await changeSettings($, s => ({ ...s, isOn: arg === 'on' }))
-      return { text: arg === 'on' ? 'Practice mode is on.' : 'Practice mode is off. Type /learn on to start again.' }
+    const action = parseLearnArgs(e.args)
+    const before = await read($, settings)
+    const isBand = await hasBand($)
+    const count = (await read($, words)).length
+
+    if (action.kind === 'language') {
+      await pickNative($, action.code)
+      const now = (await read($, settings)) ?? DEFAULT_SETTINGS
+      return { text: before === null ? levelsText() : `Help language: ${languageOf(now.native).native}.` }
     }
-    const isNew = (await read($, settings)) === null
-    if (isNew) await update($, setup, current => current ?? 'native')
-    await openPractice($)
-    return { text: isNew ? 'Choose your language in the English practice panel.' : 'Opened English practice.' }
+    if (action.kind === 'level') {
+      if (before === null) {
+        await update($, setup, () => 'native')
+        return { text: `Choose your language first.\n\n${languagesText(true)}` }
+      }
+      await pickLevel($, action.level)
+      return { text: statusText((await read($, settings)) ?? DEFAULT_SETTINGS, count) }
+    }
+    if (before === null) {
+      await update($, setup, current => current ?? 'native')
+      if (isBand) await openPractice($)
+      return { text: languagesText(true) }
+    }
+    if (action.kind === 'languages') {
+      await update($, setup, () => 'native')
+      return { text: languagesText(false) }
+    }
+    if (action.kind === 'unknown') {
+      return { text: `I don't know "/learn ${action.text}".\n\n${statusText(before, count)}` }
+    }
+    if (action.kind === 'master') await changeSettings($, current => ({ ...current, isOn: action.isOn }))
+    if (action.kind === 'feature') {
+      await changeSettings($, current => ({ ...current, features: { ...current.features, [action.feature]: action.isOn } }))
+    }
+    if (action.kind === 'translateMode') await changeSettings($, current => ({ ...current, translateMode: action.mode }))
+    if (action.kind === 'strictness') await changeSettings($, current => ({ ...current, strictness: action.strictness }))
+    if (action.kind === 'status' && isBand) await openPractice($)
+    return { text: statusText((await read($, settings)) ?? DEFAULT_SETTINGS, count) }
   })
 
-  on('command.run', { command: 'words' }, async $ => {
+  on('command.run', { command: 'words' }, async ($, e) => {
+    const [verb, ...rest] = e.args.trim().split(/\s+/)
+    if (verb === 'save') {
+      const fresh = await read($, newWords)
+      if (fresh.length === 0) return { text: 'There are no new words to save right now.' }
+      const saved = await saveWords($, fresh)
+      await update($, newWords, () => [])
+      return { text: saved === 0 ? 'You already have these words.' : `Saved ${saved}. Send /quiz to practice them.` }
+    }
+    if (verb === 'remove' && rest.length > 0) {
+      const name = rest.join(' ').toLowerCase()
+      await update($, words, all => all.filter(one => one.word.toLowerCase() !== name))
+      await $.store.set('words', await read($, words))
+      return { text: `Removed "${rest.join(' ')}".` }
+    }
+
     await update($, quiz, () => null)
-    await $.ui.open({ id: WORDS_PANE, title: 'My words' })
-    const count = (await read($, words)).length
-    return { text: `Opened your word notebook (${count === 1 ? '1 word' : `${count} words`}).` }
+    if (await hasBand($)) await $.ui.open({ id: WORDS_PANE, title: 'My words' })
+    const list = await read($, words)
+    const fresh = await read($, newWords)
+    const lines = [
+      list.length === 0 ? 'No saved words yet.' : `Your words (${list.length}):`,
+      ...[...list].reverse().slice(0, 50).map(word => `${word.word} = ${word.meaning}`),
+    ]
+    if (list.length > 50) lines.push(`and ${list.length - 50} more`)
+    if (fresh.length > 0) {
+      lines.push('', `New in Claude's last reply: ${fresh.map(word => `${word.word} = ${word.meaning}`).join(' · ')}`)
+      lines.push('Send /words save to keep them.')
+    }
+    if (list.length > 0) lines.push('', 'Send /quiz to practice. Remove one with /words remove <word>.')
+    return { text: lines.join('\n') }
   })
 
   on('command.run', { command: 'quiz' }, async $ => {
     const list = await read($, words)
-    if (list.length === 0) return { text: 'You have no saved words yet. Save words from an English tip first.' }
-    await update($, quiz, () => newQuiz(list))
-    await $.ui.open({ id: WORDS_PANE, title: 'My words' })
-    return { text: 'Quiz started in the “My words” panel.' }
+    if (list.length === 0) return { text: 'You have no saved words yet. Save some first with /words save.' }
+    if (await hasBand($)) {
+      await update($, quiz, () => newQuiz(list))
+      await $.ui.open({ id: WORDS_PANE, title: 'My words' })
+      return { text: 'Quiz started in the “My words” panel.' }
+    }
+    // Where no panel is drawn, Claude runs the quiz in the chat.
+    const asked = quizOrder(list)
+      .map(name => list.find(word => word.word === name))
+      .flatMap(word => (word === undefined ? [] : [`${word.word} = ${word.meaning}`]))
+    const text = [
+      'Quiz me on my saved English words. Ask one word at a time: show the English word and let me answer with its meaning.',
+      'Wait for my answer, tell me if I was right, then ask the next one. At the end, tell me my score.',
+      `The words (don't show the meanings before I answer): ${asked.join('; ')}`,
+    ].join(' ')
+    // A command can't start a turn while it runs, so the quiz prompt goes right after it.
+    $.clock.after(0, () => void $.prompt.submit({ asUser: true, text }))
+    return { text: `Starting a quiz with ${asked.length === 1 ? '1 word' : `${asked.length} words`}.` }
   })
 
   on('command.run', { command: 'explain' }, async ($, e) => {
@@ -740,8 +825,16 @@ export const register: Register = on => {
     if (text === '') return { text: 'Send a message first, then type /check.' }
     if ((await read($, settings)) === null) return { text: 'Type /learn first to choose your language and level.' }
     const result = await runCheck($, text, true)
+    const t = await read($, tip)
+    if (result === 'tip' && t !== null) {
+      const lines = [`English tip. You wrote: "${t.original}"`, `Better: ${t.better}`]
+      if (t.why !== '') lines.push(`Why: ${t.why}`)
+      if (t.whyNative !== '') lines.push(t.whyNative)
+      if (t.words.length > 0) lines.push(`New words: ${t.words.map(word => `${word.word} = ${word.meaning}`).join(' · ')}`)
+      return { text: lines.join('\n') }
+    }
     const answers: Record<CheckResult, string> = {
-      tip: 'I found something to improve. See the English tip above the input.',
+      tip: 'I found something to improve.',
       ok: 'Your last message has no big mistakes. Nice!',
       skipped: 'Your last message was too short to check.',
       failed: 'The check did not work this time. Try again later.',
