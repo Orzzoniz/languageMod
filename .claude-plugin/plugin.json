@@ -1,0 +1,7 @@
+{
+  "name": "languagemod",
+  "version": "0.1.0",
+  "description": "Practice English while you code: simple replies at your level, gentle corrections, word help in your own language, a word notebook and quizzes.",
+  "author": { "name": "Orzz" },
+  "types": "./types/index.d.ts"
+}

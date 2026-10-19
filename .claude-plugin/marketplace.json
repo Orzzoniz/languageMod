@@ -1,0 +1,6 @@
+{
+  "name": "languagemod",
+  "description": "Practice English while you code with Claude Code.",
+  "owner": { "name": "Orzz" },
+  "plugins": [{ "name": "languagemod", "source": "./" }]
+}
