@@ -52,6 +52,10 @@ type Beneath = {
   onModel?: (system: string, prompt: string) => void
   /** Called with each prompt that reaches Claude Code. */
   onPrompt?: (text: string) => void
+  /** The surfaces drawing the session; the terminal when not given. */
+  surfaces?: readonly ('terminal' | 'desktop' | 'mobile' | 'vscode')[]
+  /** Called with each toast. */
+  onToast?: (text: string) => void
 }
 
 /** Stands for Claude Code beneath the mod. */
@@ -72,7 +76,11 @@ function engine(on: On, beneath: Beneath = {}) {
     return { value: { isAnswered: true as const, text, usage: USAGE } }
   })
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => {
+    beneath.onToast?.(e.text)
+    return { value: undefined }
+  })
+  on('session.surfaces', () => ({ value: beneath.surfaces ?? ['terminal'] }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
@@ -382,4 +390,26 @@ test('when the translation fails, the original message is sent', async ($, on) =
 
   await $.prompt.submit({ text: '请修复 `app.js` 让页面能用', wait: false, origin: { kind: 'composer' } })
   expect(sent).toEqual(['请修复 `app.js` 让页面能用'])
+})
+
+test('on a phone, /learn opens a panel with the setup, and tips arrive as toasts', async ($, on) => {
+  const toasts: string[] = []
+  engine(on, { coach: CORRECTION, surfaces: ['mobile'], onToast: text => toasts.push(text) })
+  mock.store(on)
+  const clock = mock.clock(on)
+  await $.session.start(START)
+  expect(toasts.some(text => text.includes('/learn'))).toBe(true)
+
+  const learned = await $.command.run({ command: 'learn', args: '', origin: { kind: 'bridge' }, presentation: undefined as never })
+  expect(learned.text).toContain('panel')
+  const pane = await $.ui.mount({ plugin: 'languagemod', surface: 'mobile', ...SETTINGS_PANE })
+  await pane.press({ key: 'lang:ko' })
+  await pane.press({ key: 'level:beginner' })
+  expect(await pane.find({ key: 'set:feature:translate' })).toBeDefined()
+
+  await $.prompt.submit({ text: 'could u think the result will effect now page?', wait: false, origin: { kind: 'bridge' } })
+  await clock.settle()
+  expect(toasts.some(text => text.includes('affect this page'))).toBe(true)
+  expect(await pane.find({ key: 'tip:ok' })).toBeDefined()
+  await pane.unmount()
 })

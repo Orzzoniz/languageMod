@@ -25,7 +25,10 @@ There is also a word notebook and a quiz. Words you don't know yet come back fir
 
 ## How it looks
 
-The first time, two clicks above the input box:
+Type `/learn` to open the **English practice** panel. It works in the terminal, the desktop app, the web and the phone app.
+In the terminal and the desktop app, the same things also show in a box above the input.
+
+The first time, two clicks:
 
 ```
 Practice English while you code. Which language do you know best?

@@ -86,6 +86,19 @@ type CheckResult = 'tip' | 'ok' | 'skipped' | 'failed'
 // Only the newest check may show its tip, so a slow answer never replaces a newer one.
 let checkCount = 0
 
+/** Whether a surface that draws the band above the input (terminal, desktop) is attached. */
+async function hasBand($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.session.surfaces()).some(surface => surface === 'terminal' || surface === 'desktop')
+  } catch {
+    return true
+  }
+}
+
+function openPractice($: EngineInterface) {
+  return $.ui.open({ id: SETTINGS_PANE, title: 'English practice' })
+}
+
 async function changeSettings($: EngineInterface, change: (s: Practice) => Practice): Promise<Practice> {
   await update($, settings, s => change(s ?? DEFAULT_SETTINGS))
   const saved = (await read($, settings)) ?? DEFAULT_SETTINGS
@@ -137,7 +150,12 @@ async function runCheck($: EngineInterface, text: string, isAsked: boolean): Pro
     await update($, streak, () => 0)
     await update($, showNative, () => false)
     await update($, tip, () => next)
-    $.ui.status('English: a tip is waiting above the input')
+    if (await hasBand($)) {
+      $.ui.status('English: a tip is waiting above the input')
+    } else {
+      $.ui.status('English: a tip is waiting in /learn')
+      $.ui.toast(`English tip. Better: ${clip(next.better, 300)}`, { timeoutMs: 12_000 })
+    }
     return 'tip'
   } catch {
     if (count === checkCount) $.ui.status(undefined)
@@ -359,6 +377,22 @@ function wordsBand(ui: Ui, $: EngineInterface, fresh: readonly NewWord[]) {
   )
 }
 
+/** What waits for the person now: the setup, a translation to check, a tip, or new words; null for nothing. */
+async function nowView(ui: Ui, $: EngineInterface) {
+  const step = await read($, setup)
+  if (step !== null) return setupBand(ui, $, step)
+  const s = await read($, settings)
+  if (s === null || !s.isOn) return null
+  const p = await read($, pending)
+  if (p !== null) return pendingBand(ui, $, p)
+  const t = await read($, tip)
+  // A tip comes from Corrections or from /check, which works with Corrections off.
+  if (t !== null) return tipBand(ui, $, t, s, await read($, showNative))
+  const fresh = await read($, newWords)
+  if (fresh.length > 0 && isActive(s, 'collect')) return wordsBand(ui, $, fresh)
+  return null
+}
+
 function settingsView(ui: Ui, $: EngineInterface, s: Practice | null, wordCount: number) {
   const { Box, Text, Button } = ui
   if (s === null) {
@@ -570,6 +604,9 @@ export const register: Register = on => {
       argumentHint: '[text]',
     })
     await $.command.register({ name: 'check', description: 'English practice: check the English of your last message' })
+    if (saved === null && !isDismissed && !(await hasBand($))) {
+      $.ui.toast('English practice is ready. Type /learn to start.', { timeoutMs: 12_000 })
+    }
     return next(e)
   })
 
@@ -592,7 +629,9 @@ export const register: Register = on => {
       const translation = await translate($, text, s, next.signal)
       if (translation !== null && s.translateMode === 'review') {
         await update($, pending, () => translation)
-        return { drop: 'Check the English version above the input box.' }
+        if (await hasBand($)) return { drop: 'Check the English version above the input box.' }
+        await openPractice($)
+        return { drop: 'Check the English version in the English practice panel.' }
       }
       if (translation !== null) {
         await rememberTranslation($, translation)
@@ -615,21 +654,10 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Drawn on the terminal and desktop only; the English practice panel shows the same on every surface.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const ui = $.ui.resolve(e)
-    const step = await read($, setup)
-    if (step !== null) return setupBand(ui, $, step)
-
-    const s = await read($, settings)
-    const p = await read($, pending)
-    if (p !== null && s !== null && s.isOn) return pendingBand(ui, $, p)
-    const t = await read($, tip)
-    // A tip comes from Corrections or from /check, which works with Corrections off.
-    if (t !== null && s !== null && s.isOn) return tipBand(ui, $, t, s, await read($, showNative))
-    const fresh = await read($, newWords)
-    if (fresh.length > 0 && isActive(s, 'collect')) return wordsBand(ui, $, fresh)
-    return next(e)
+    return (await nowView($.ui.resolve(e), $)) ?? next(e)
   })
 
   // A translated message shows the English that Claude read, with what the person wrote under it.
@@ -642,7 +670,19 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: SETTINGS_PANE }, async ($, e) => {
-    return settingsView($.ui.resolve(e), $, await read($, settings), (await read($, words)).length)
+    const ui = $.ui.resolve(e)
+    const step = await read($, setup)
+    if (step !== null) return setupBand(ui, $, step)
+    const now = await nowView(ui, $)
+    const view = settingsView(ui, $, await read($, settings), (await read($, words)).length)
+    if (now === null) return view
+    const { Box } = ui
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        {now}
+        {view}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: WORDS_PANE }, async ($, e) => {
@@ -659,12 +699,10 @@ export const register: Register = on => {
       await changeSettings($, s => ({ ...s, isOn: arg === 'on' }))
       return { text: arg === 'on' ? 'Practice mode is on.' : 'Practice mode is off. Type /learn on to start again.' }
     }
-    if ((await read($, settings)) === null) {
-      await update($, setup, () => 'native')
-      return { text: 'Choose your language in the box above the input.' }
-    }
-    await $.ui.open({ id: SETTINGS_PANE, title: 'English practice' })
-    return { text: 'Opened the English practice settings.' }
+    const isNew = (await read($, settings)) === null
+    if (isNew) await update($, setup, current => current ?? 'native')
+    await openPractice($)
+    return { text: isNew ? 'Choose your language in the English practice panel.' : 'Opened English practice.' }
   })
 
   on('command.run', { command: 'words' }, async $ => {
