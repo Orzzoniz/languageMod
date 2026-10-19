@@ -36,7 +36,7 @@ import {
   sameText,
   translateSystem,
 } from './coach'
-import { ENGLISH, LANGUAGES, languageOf } from './languages'
+import { ENGLISH, findLanguage, LANGUAGES, languageOf } from './languages'
 
 const settings = atom({ plugin: 'languagemod', key: 'settings' } as const, null)
 const setup = atom({ plugin: 'languagemod', key: 'setup' } as const, null)
@@ -594,7 +594,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'learn',
       description: 'English practice: settings, and switch each part on or off',
-      argumentHint: '[on|off]',
+      argumentHint: '[on|off|language|level]',
     })
     await $.command.register({ name: 'words', description: 'English practice: open your word notebook' })
     await $.command.register({ name: 'quiz', description: 'English practice: quiz yourself on your saved words' })
@@ -699,10 +699,38 @@ export const register: Register = on => {
       await changeSettings($, s => ({ ...s, isOn: arg === 'on' }))
       return { text: arg === 'on' ? 'Practice mode is on.' : 'Practice mode is off. Type /learn on to start again.' }
     }
+    // Typing the choice works where the panel's buttons cannot be pressed.
+    const lang = findLanguage(arg)
+    if (lang !== undefined) {
+      const isFirstTime = (await read($, settings)) === null
+      const saved = await changeSettings($, s => ({ ...s, native: lang.code }))
+      await update($, setup, () => null)
+      if (!isFirstTime) return { text: `Help language: ${lang.native}.` }
+      const level = LEVELS.find(one => one.level === saved.level)?.label ?? saved.level
+      return {
+        text: `Practice mode is on. Help language: ${lang.native}. Level: ${level}. To change the level, type /learn middle or /learn advanced.`,
+      }
+    }
+    const level = LEVELS.find(one => one.level === arg)
+    if (level !== undefined) {
+      if ((await read($, settings)) === null) return { text: 'Choose your language first, like /learn japanese.' }
+      await changeSettings($, s => ({ ...s, level: level.level }))
+      await update($, setup, step => (step === 'level' ? null : step))
+      return { text: `Level: ${level.label} (${level.hint}).` }
+    }
+    if (arg !== '' && arg !== 'on' && arg !== 'off') {
+      return {
+        text: `I don’t know “${e.args.trim()}”. Type a language, like /learn japanese, or a level, like /learn beginner.`,
+      }
+    }
     const isNew = (await read($, settings)) === null
     if (isNew) await update($, setup, current => current ?? 'native')
     await openPractice($)
-    return { text: isNew ? 'Choose your language in the English practice panel.' : 'Opened English practice.' }
+    return {
+      text: isNew
+        ? 'Choose your language in the English practice panel, or type it, like /learn japanese.'
+        : 'Opened English practice.',
+    }
   })
 
   on('command.run', { command: 'words' }, async $ => {

@@ -13,6 +13,7 @@ import {
   proseOf,
   restoreCode,
 } from '../hooks/coach'
+import { findLanguage } from '../hooks/languages'
 
 const SAVED = { ...DEFAULT_SETTINGS, native: 'zh-CN' }
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
@@ -172,6 +173,40 @@ for (const surface of ['terminal', 'desktop', 'mobile'] as const) {
     expect(section?.text).toContain('CEFR level B1')
   })
 }
+
+test('a language is found by its code, English name or own name', () => {
+  expect(findLanguage('ja')?.code).toBe('ja')
+  expect(findLanguage(' Japanese ')?.code).toBe('ja')
+  expect(findLanguage('日本語')?.code).toBe('ja')
+  expect(findLanguage('español')?.code).toBe('es')
+  expect(findLanguage('english')?.code).toBe('en')
+  expect(findLanguage('chinese')).toBeUndefined()
+  expect(findLanguage('')).toBeUndefined()
+})
+
+test('typing /learn japanese chooses the language without the panel', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  await $.session.start(START)
+  const learn = (args: string) =>
+    $.command.run({ command: 'learn', args, origin: { kind: 'bridge' }, presentation: undefined as never })
+
+  expect((await learn('middle')).text).toContain('Choose your language first')
+  expect((await learn('Japanese')).text).toContain('Help language: 日本語. Level: Beginner.')
+  const band = await $.ui.mount({ plugin: 'languagemod', surface: 'terminal', ...BAND })
+  expect(await band.find({ key: 'lang:ja' })).toBeUndefined()
+  expect(await band.find({ key: 'level:middle' })).toBeUndefined()
+  await band.unmount()
+
+  expect((await learn('middle')).text).toBe('Level: Middle (plain sentences).')
+  const prompt = await $.prompt.compose(COMPOSE)
+  const section = prompt.sections.find(one => one.id === 'languagemod:learn')
+  expect(section?.text).toContain('Japanese')
+  expect(section?.text).toContain('CEFR level B1')
+
+  expect((await learn('한국어')).text).toBe('Help language: 한국어.')
+  expect((await learn('klingon')).text).toContain('/learn japanese')
+})
 
 test('changing the language later skips the level question', async ($, on) => {
   engine(on)

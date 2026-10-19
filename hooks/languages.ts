@@ -32,3 +32,12 @@ export function languageOf(code: string): Language {
 export function isKnownLanguage(code: string): boolean {
   return code === ENGLISH.code || LANGUAGES.some(lang => lang.code === code)
 }
+
+/** The language a person typed by its code, English name or own name (`ja`, `japanese`, `日本語`), if any. */
+export function findLanguage(name: string): Language | undefined {
+  const typed = name.trim().toLowerCase()
+  if (typed === '') return undefined
+  return [...LANGUAGES, ENGLISH].find(lang =>
+    [lang.code, lang.english, lang.native].some(one => one.toLowerCase() === typed),
+  )
+}

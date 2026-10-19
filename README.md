@@ -72,7 +72,7 @@ Level: [ Beginner ] [ Middle ] [ Advanced ]
 
 | Command | What it does |
 | --- | --- |
-| `/learn` | Open the settings. `/learn off` turns everything off, `/learn on` turns it back on. |
+| `/learn` | Open the settings. `/learn off` turns everything off, `/learn on` turns it back on. `/learn japanese` (or `/learn ja`, `/learn 日本語`) chooses your language and `/learn middle` your level, without the panel. |
 | `/words` | Open your word notebook. |
 | `/quiz` | Practice your saved words. |
 | `/explain` | Explain Claude's last reply in your language. `/explain <text>` explains that text. |
