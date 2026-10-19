@@ -101,6 +101,18 @@ From a shell:
 claude plugin install languagemod --marketplace Orzzoniz/languageMod
 ```
 
+### Claude Code on the web and the phone app
+
+Cloud sessions start fresh each time and can't run `/plugin install`, so the mod is turned on by the
+environment's **Setup script**, which runs when each new session starts:
+
+1. Open the cloud environment menu in the session's title bar, then **Edit**.
+2. Paste the contents of [`scripts/cloud-setup.sh`](scripts/cloud-setup.sh) into **Setup script** and save.
+3. Start a new session and type `/learn`.
+
+The script downloads the mod and names its folder in `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json`.
+If the download fails, the session starts as usual without the mod.
+
 To try it from a folder without installing:
 
 ```
