@@ -6,8 +6,12 @@ import {
   harvestWords,
   isWorthChecking,
   learnSection,
+  looksForeign,
+  maskCode,
   parseCoach,
+  parseTranslation,
   proseOf,
+  restoreCode,
 } from '../hooks/coach'
 
 const SAVED = { ...DEFAULT_SETTINGS, native: 'zh-CN' }
@@ -39,24 +43,51 @@ const CORRECTION = JSON.stringify({
   words: [{ word: 'affect', meaning: '影响' }],
 })
 
-/** Stands for Claude Code beneath the mod, with the coach answering `coachReply`. */
-function engine(on: On, coachReply = '{"ok": true}', onCheck = () => {}) {
+type Beneath = {
+  /** What the coach answers. */
+  coach?: string
+  /** What the translator answers. */
+  translation?: string
+  /** Called with each model request: its system prompt and prompt. */
+  onModel?: (system: string, prompt: string) => void
+  /** Called with each prompt that reaches Claude Code. */
+  onPrompt?: (text: string) => void
+}
+
+/** Stands for Claude Code beneath the mod. */
+function engine(on: On, beneath: Beneath = {}) {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }] }))
-  on('prompt.submit', ($, e) => ({ text: e.text }))
-  on('model.complete', () => {
-    onCheck()
-    return { value: { isAnswered: true as const, text: coachReply, usage: USAGE } }
+  on('prompt.submit', ($, e) => {
+    beneath.onPrompt?.(e.text)
+    return { text: e.text }
+  })
+  on('prompt.fill', () => ({ isFilled: true }))
+  on('model.complete', ($, e) => {
+    const system = e.system ?? ''
+    beneath.onModel?.(system, e.prompt)
+    const isTranslator = system.includes('You translate')
+    const text = isTranslator ? (beneath.translation ?? '<same/>') : (beneath.coach ?? '{"ok": true}')
+    return { value: { isAnswered: true as const, text, usage: USAGE } }
   })
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.render', ($, e) => {
-    const { Box } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
+    if (e.component === 'UserMessage') return <Text>{e.props.text}</Text>
     return <Box key="engine" />
   })
 }
+
+const TRANSLATION = [
+  '<english>Please fix ⟦0⟧ so the page works.</english>',
+  '<language>Chinese</language>',
+  '<words>',
+  'fix = 修复',
+  '</words>',
+].join('\n')
 
 const START = { cwd: '/work', surface: 'terminal', isInteractive: true } as const
 
@@ -181,7 +212,7 @@ test('a feature switch in the settings panel turns that feature off', async ($, 
 })
 
 test('a message with a mistake shows a tip, and its word can be saved', async ($, on) => {
-  engine(on, CORRECTION)
+  engine(on, { coach: CORRECTION })
   mock.store(on, { settings: SAVED })
   const clock = mock.clock(on)
   await $.session.start(START)
@@ -204,8 +235,11 @@ test('a message with a mistake shows a tip, and its word can be saved', async ($
 
 test('with Corrections off, no check runs until /check', async ($, on) => {
   let checks = 0
-  engine(on, CORRECTION, () => {
-    checks += 1
+  engine(on, {
+    coach: CORRECTION,
+    onModel: () => {
+      checks += 1
+    },
   })
   mock.store(on, { settings: { ...SAVED, features: { ...SAVED.features, coach: false } } })
   const clock = mock.clock(on)
@@ -250,4 +284,102 @@ test('the quiz asks each saved word and counts what you knew', async ($, on) => 
   await pane.press({ key: 'quiz:stop' })
   expect(await pane.find({ key: 'words:quiz' })).toBeDefined()
   await pane.unmount()
+})
+
+test('messages in another language are told from English', () => {
+  expect(looksForeign('帮我修复这个错误', 'zh-CN')).toBe(true)
+  expect(looksForeign('help me 修复 this bug', 'zh-CN')).toBe(true)
+  expect(looksForeign('please fix the bug in this file', 'zh-CN')).toBe(false)
+  expect(looksForeign('por favor arregla el error en este archivo', 'es')).toBe(true)
+  expect(looksForeign('please fix the error in this file', 'es')).toBe(false)
+  expect(looksForeign('ok', 'es')).toBe(false)
+})
+
+test('code is kept out of the translation and put back after', () => {
+  const { masked, blocks } = maskCode('修复 `npm test` 和\n```js\nconst a = 1\n```')
+  expect(masked).toBe('修复 ⟦0⟧ 和\n⟦1⟧')
+  expect(restoreCode('Fix ⟦0⟧ and\n⟦1⟧', blocks)).toBe('Fix `npm test` and\n```js\nconst a = 1\n```')
+  expect(restoreCode('Fix it', blocks)).toBe(null)
+  expect(parseTranslation('<same/>')).toBe('same')
+  expect(parseTranslation(TRANSLATION)).toEqual({
+    english: 'Please fix ⟦0⟧ so the page works.',
+    language: 'Chinese',
+    words: [{ word: 'fix', meaning: '修复' }],
+  })
+})
+
+test('a message in your language reaches Claude in English, with your words under it', async ($, on) => {
+  const prompts: string[] = []
+  const sent: string[] = []
+  engine(on, { translation: TRANSLATION, onModel: (system, prompt) => prompts.push(prompt), onPrompt: text => sent.push(text) })
+  mock.store(on, { settings: SAVED })
+  mock.clock(on)
+  await $.session.start(START)
+
+  const result = await $.prompt.submit({ text: '请修复 `app.js` 让页面能用', wait: false, origin: { kind: 'composer' } })
+  expect(prompts[0]).toBe('请修复 ⟦0⟧ 让页面能用')
+  expect(result.text).toBe('Please fix `app.js` so the page works.')
+  expect(sent).toEqual(['Please fix `app.js` so the page works.'])
+
+  const row = await $.ui.mount({
+    plugin: 'languagemod',
+    surface: 'terminal',
+    component: 'UserMessage',
+    props: { text: 'Please fix `app.js` so the page works.', origin: { kind: 'composer' }, isExpanded: false },
+  })
+  expect(await row.find({ text: /you wrote: 请修复/ })).toBeDefined()
+  await row.unmount()
+
+  const band = await $.ui.mount({ plugin: 'languagemod', surface: 'terminal', ...BAND })
+  expect(await band.find({ text: /fix = 修复/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('with "Let me check first", the English waits above the input until you send it', async ($, on) => {
+  const sent: string[] = []
+  engine(on, { translation: TRANSLATION, onPrompt: text => sent.push(text) })
+  mock.store(on, { settings: { ...SAVED, translateMode: 'review' } })
+  mock.clock(on)
+  await $.session.start(START)
+
+  const result = await $.prompt.submit({ text: '请修复 `app.js` 让页面能用', wait: false, origin: { kind: 'composer' } })
+  expect('drop' in result && result.drop).toBeTruthy()
+  expect(sent).toEqual([])
+
+  const band = await $.ui.mount({ plugin: 'languagemod', surface: 'mobile', ...BAND })
+  expect(await band.find({ text: /Please fix `app.js`/ })).toBeDefined()
+  await band.press({ key: 'pending:send' })
+  expect(sent).toEqual(['Please fix `app.js` so the page works.'])
+  expect(await band.find({ key: 'pending:send' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('English messages and Translate off are sent as written', async ($, on) => {
+  const sent: string[] = []
+  let translations = 0
+  engine(on, {
+    onModel: system => {
+      if (system.includes('You translate')) translations += 1
+    },
+    onPrompt: text => sent.push(text),
+  })
+  mock.store(on, { settings: { ...SAVED, features: { ...SAVED.features, translate: false } } })
+  mock.clock(on)
+  await $.session.start(START)
+
+  await $.prompt.submit({ text: '请修复这个错误', wait: false, origin: { kind: 'composer' } })
+  await $.prompt.submit({ text: 'please fix this error', wait: false, origin: { kind: 'composer' } })
+  expect(translations).toBe(0)
+  expect(sent).toEqual(['请修复这个错误', 'please fix this error'])
+})
+
+test('when the translation fails, the original message is sent', async ($, on) => {
+  const sent: string[] = []
+  engine(on, { translation: 'sorry, no', onPrompt: text => sent.push(text) })
+  mock.store(on, { settings: SAVED })
+  mock.clock(on)
+  await $.session.start(START)
+
+  await $.prompt.submit({ text: '请修复 `app.js` 让页面能用', wait: false, origin: { kind: 'composer' } })
+  expect(sent).toEqual(['请修复 `app.js` 让页面能用'])
 })

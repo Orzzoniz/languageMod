@@ -5,16 +5,21 @@ export type Strictness = 'big' | 'all'
 
 /**
  * The parts of practice mode a person can switch on and off one by one:
+ * `translate` messages written in another language sent to Claude in English,
  * `simple` replies at their level, `glossary` hard words translated,
  * `coach` corrections of what they type, `collect` saving new words.
  */
-export type Feature = 'simple' | 'glossary' | 'coach' | 'collect'
+export type Feature = 'translate' | 'simple' | 'glossary' | 'coach' | 'collect'
+
+/** `send`: the English goes to Claude at once; `review`: the person sees it first. */
+export type TranslateMode = 'send' | 'review'
 
 export type Practice = {
   isOn: boolean
   native: string
   level: Level
   strictness: Strictness
+  translateMode: TranslateMode
   features: Record<Feature, boolean>
 }
 
@@ -29,6 +34,8 @@ export type Tip = {
   whyNative: string
   words: NewWord[]
 }
+
+export type Translation = { original: string; english: string; language: string; words: NewWord[] }
 
 export type Setup = 'native' | 'level' | null
 
@@ -46,6 +53,8 @@ declare module 'claude-code' {
       quiz: Quiz
       lastPrompt: string
       streak: number
+      translations: Translation[]
+      pending: Translation | null
     }
   }
 }

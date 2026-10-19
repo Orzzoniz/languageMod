@@ -3,14 +3,15 @@ import { isKnownLanguage, languageOf } from './languages'
 
 export const COACH_MODEL = 'haiku'
 
-export const FEATURES: readonly Feature[] = ['simple', 'glossary', 'coach', 'collect']
+export const FEATURES: readonly Feature[] = ['translate', 'simple', 'glossary', 'coach', 'collect']
 
 export const DEFAULT_SETTINGS: Practice = {
   isOn: true,
   native: 'en',
   level: 'beginner',
   strictness: 'big',
-  features: { simple: true, glossary: true, coach: true, collect: true },
+  translateMode: 'send',
+  features: { translate: true, simple: true, glossary: true, coach: true, collect: true },
 }
 
 export function isActive(s: Practice | null, feature: Feature): s is Practice {
@@ -144,6 +145,93 @@ export function sameText(a: string, b: string): boolean {
   return plain(a) === plain(b)
 }
 
+// Native languages written in the Latin alphabet, where a message has to be told from English by its words.
+const LATIN_NATIVE = new Set(['es', 'pt-BR', 'fr', 'de', 'vi', 'id', 'tr', 'it', 'pl'])
+
+// Short words almost every English sentence has and these other languages do not.
+const ENGLISH_COMMON = new Set(
+  (
+    'a an the is are was were be been am i you he she it we they me my your our this that these those ' +
+    'to of and in on at for with from by as or but if not no do does did can could will would should ' +
+    'have has had what why how when where which who there here please just also so all some any more ' +
+    'help make get use want need fix add run show tell let like about into out up'
+  ).split(' '),
+)
+
+// One letter of these scripts says about as much as a short English word.
+const DENSE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u
+
+/** True when a message is written, wholly or partly, in a language other than English. */
+export function looksForeign(prose: string, native: string): boolean {
+  let latin = 0
+  let other = 0
+  for (const char of prose) {
+    if (/\p{Script=Latin}/u.test(char)) latin += 1
+    else if (/\p{L}/u.test(char)) other += DENSE_SCRIPT.test(char) ? 3 : 1
+  }
+  if (other >= 2 && other / (latin + other) >= 0.15) return true
+  if (!LATIN_NATIVE.has(native)) return false
+  const words = prose.toLowerCase().match(/[\p{L}']+/gu) ?? []
+  if (words.length < 3) return false
+  return words.filter(word => ENGLISH_COMMON.has(word)).length / words.length < 0.2
+}
+
+export function translateSystem(s: Practice): string {
+  const lang = languageOf(s.native)
+  const helpLanguage = lang.code === 'en' ? 'simple English' : lang.english
+  return [
+    "You translate a software developer's message into natural, clear English for an AI coding assistant.",
+    'Keep the exact meaning and tone. Do not answer the message, explain it, or add anything.',
+    'Keep these unchanged: placeholders like ⟦0⟧, file paths, commands, URLs, code identifiers, and product names.',
+    'If the message asks to use specific non-English text (a UI label, a string, a translation), keep that text exactly as written.',
+    'If the whole message is already in English, answer only: <same/>',
+    'Otherwise answer in exactly this format:',
+    '<english>the translation</english>',
+    '<language>the name of the language it was written in, in English</language>',
+    '<words>',
+    `up to 3 lines like "fix = <meaning in ${helpLanguage}>": the English words in your translation for what they wrote in their own language`,
+    '</words>',
+  ].join('\n')
+}
+
+export type Translated = { english: string; language: string; words: NewWord[] }
+
+export function parseTranslation(reply: string): Translated | 'same' | null {
+  const english = /<english>([\s\S]*?)<\/english>/.exec(reply)?.[1]?.trim() ?? ''
+  if (english === '') return /<same\s*\/>/.test(reply) ? 'same' : null
+  const language = /<language>([\s\S]*?)<\/language>/.exec(reply)?.[1]?.trim() ?? ''
+  const list = /<words>([\s\S]*?)<\/words>/.exec(reply)?.[1] ?? ''
+  const words = list
+    .split('\n')
+    .flatMap(line => {
+      const match = /^\s*[-*]?\s*(.+?)\s*=\s*(.+?)\s*$/.exec(line)
+      return match?.[1] && match[2] ? [{ word: match[1], meaning: match[2] }] : []
+    })
+    .slice(0, 3)
+  return { english, language, words }
+}
+
+/** Code in a message, swapped for numbered marks the translator keeps, so the code is never translated. */
+export function maskCode(text: string): { masked: string; blocks: string[] } {
+  const blocks: string[] = []
+  const masked = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, block => {
+    blocks.push(block)
+    return `⟦${blocks.length - 1}⟧`
+  })
+  return { masked, blocks }
+}
+
+/** The code put back in place of its marks, or null when the translation lost a mark. */
+export function restoreCode(text: string, blocks: readonly string[]): string | null {
+  let restored = text
+  for (const [index, block] of blocks.entries()) {
+    const mark = `⟦${index}⟧`
+    if (!restored.includes(mark)) return null
+    restored = restored.replace(mark, () => block)
+  }
+  return restored
+}
+
 const GLOSS = /\*\*([A-Za-z][A-Za-z'’ -]{0,38}[A-Za-z])\*\*\s*\(([^()\n]{1,60})\)/g
 
 /** The words Claude glossed in a reply, written as **word** (meaning), outside code. */
@@ -192,7 +280,9 @@ export function parseSettings(raw: unknown): Practice | null {
     native: isKnownLanguage(native) ? native : DEFAULT_SETTINGS.native,
     level: raw.level === 'middle' || raw.level === 'advanced' ? raw.level : 'beginner',
     strictness: raw.strictness === 'all' ? 'all' : 'big',
+    translateMode: raw.translateMode === 'review' ? 'review' : 'send',
     features: {
+      translate: features.translate !== false,
       simple: features.simple !== false,
       glossary: features.glossary !== false,
       coach: features.coach !== false,

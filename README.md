@@ -11,10 +11,15 @@ Every part has its own On/Off switch in `/learn`.
 
 | Part | What you see |
 | --- | --- |
+| **Translate** | Don't know how to say it? Write in your language, or half and half. Claude gets it in clear English, and you see the English with your words under it. |
 | **Simple English** | Claude writes at your level: short, easy sentences for beginners. |
 | **Word help** | Hard words come with a translation: **deprecated** (已弃用). |
 | **Corrections** | After you send a message, a small tip shows a better way to say it. Claude still does your task. |
 | **Collect words** | Save the new words from Claude's replies to your notebook. |
+
+Translate has two ways to work: **Send in English** sends the English at once, and
+**Let me check first** shows you the English above the input, so you can send it, edit it, or send your original.
+Code, file paths and commands are never translated.
 
 There is also a word notebook and a quiz. Words you don't know yet come back first.
 
@@ -25,6 +30,13 @@ The first time, two clicks above the input box:
 ```
 Practice English while you code. Which language do you know best?
 [ 简体中文 ] [ 繁體中文 ] [ 日本語 ] [ 한국어 ] [ Español ] ... [ English only ]
+```
+
+A message you wrote in your language, as Claude reads it:
+
+```
+> Please fix `app.js` so the page works.
+  (you wrote: 请修复 `app.js` 让页面能用)
 ```
 
 A correction tip:
@@ -44,6 +56,8 @@ Practice mode is on                              [ Turn off ]
 Help language: 简体中文  Change
 Level: [ Beginner ] [ Middle ] [ Advanced ]
 
+[ On  ] Translate        write in your language, Claude reads English
+        Then: [ Send in English ] [ Let me check first ]
 [ On  ] Simple English   Claude writes at your level
 [ On  ] Word help        hard words come with a translation
 [ On  ] Corrections      a tip when your message has a mistake
@@ -95,8 +109,9 @@ claude --plugin-dir /path/to/languageMod
 - If the mod has an error, Claude Code skips it and keeps working normally.
 - The mod never changes your files. It adds a few lines to Claude's instructions,
   draws its boxes, and keeps your settings and words in its own store.
-- Corrections send a copy of each message you type to a small, fast Claude model (Haiku),
-  which uses a little of your usage. Turn Corrections off to stop it; `/check` then checks only when you ask.
+- Corrections and Translate send a copy of your message to a small, fast Claude model (Haiku),
+  which uses a little of your usage. Turn them off to stop it; `/check` then checks only when you ask.
+- If a translation fails, your original message is sent. The mod never holds your message back.
 - `/learn off` stops everything at once.
 
 ## How it works
@@ -104,7 +119,8 @@ claude --plugin-dir /path/to/languageMod
 The mod uses Claude Code's function hooks:
 
 - `prompt.compose` adds the practice rules to Claude's system prompt, only for the parts that are on.
-- `prompt.submit` notes your message; the check runs right after, so your message is never held up.
+- `prompt.submit` sends a message written in another language to Claude in English (code kept as it is),
+  and starts the English check right after, so your message is never held up by it.
 - `turn.complete` finds the words Claude explained, written as **word** (meaning).
 - `ui.render` draws the setup and tip box above the input, the settings panel and the word notebook.
 
